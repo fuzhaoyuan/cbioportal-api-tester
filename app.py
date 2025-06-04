@@ -179,40 +179,49 @@ def main():
                     full_url1 = build_full_url(url1, request_info['original_url'])
                     full_url2 = build_full_url(url2, request_info['original_url'])
                     
-                    st.subheader(f"Testing: {file.name}")
+                    st.subheader(f"Testing: {request_info['api_path']}")
                     
                     # Display request info
                     with st.expander("Request Details"):
                         col1, col2 = st.columns(2)
                         with col1:
                             st.write("**Method:**", request_info['method'])
-                            st.write("**Original URL:**", request_info['original_url'])
+                            st.write("**JSON File:**", file.name)
                         with col2:
                             st.write("**Full URL 1:**", full_url1)
                             st.write("**Full URL 2:**", full_url2)
                         st.json(request_info['data'])
                     
-                    # Run multiple requests for each URL
+                    # Show individual file results
+                    file_results = []
+                    
+                    # Run multiple requests for each URL with parallel execution
                     for i in range(num_requests):
                         status_text.text(f"Testing {file.name} - Request {i+1}/{num_requests}")
                         
-                        # Test both URLs
-                        result1 = make_request(
-                            full_url1, 
-                            request_info['data'], 
-                            request_info['method'], 
-                            timeout
-                        )
-                        test_count += 1
-                        progress_bar.progress(test_count / total_tests)
+                        # Test both URLs in parallel using ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=2) as executor:
+                            # Submit both requests simultaneously
+                            future1 = executor.submit(
+                                make_request,
+                                full_url1, 
+                                request_info['data'], 
+                                request_info['method'], 
+                                timeout
+                            )
+                            future2 = executor.submit(
+                                make_request,
+                                full_url2, 
+                                request_info['data'], 
+                                request_info['method'], 
+                                timeout
+                            )
+                            
+                            # Get results as they complete
+                            result1 = future1.result()
+                            result2 = future2.result()
                         
-                        result2 = make_request(
-                            full_url2, 
-                            request_info['data'], 
-                            request_info['method'], 
-                            timeout
-                        )
-                        test_count += 1
+                        test_count += 2
                         progress_bar.progress(test_count / total_tests)
                         
                         # Store results
@@ -234,6 +243,23 @@ def main():
                                 **result2
                             }
                         ])
+                        
+                        # Store file-specific results for display
+                        file_results.extend([result1, result2])
+                    
+                    # Display results for this file
+                    if file_results:
+                        url1_times = [r['response_time'] for i, r in enumerate(file_results) if i % 2 == 0]
+                        url2_times = [r['response_time'] for i, r in enumerate(file_results) if i % 2 == 1]
+                        
+                        url1_avg = sum(url1_times) / len(url1_times) if url1_times else 0
+                        url2_avg = sum(url2_times) / len(url2_times) if url2_times else 0
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("URL 1 Average", f"{url1_avg:.2f} ms")
+                        with col2:
+                            st.metric("URL 2 Average", f"{url2_avg:.2f} ms")
             
             status_text.text("✅ All tests completed!")
             progress_bar.progress(1.0)
@@ -288,62 +314,59 @@ def main():
             # Pivot the data to show URL1 and URL2 in the same row
             pivot_data = []
             
-            # Group by api_path, request_num, and file
-            grouped = df.groupby(['api_path', 'request_num', 'file'])
+            # Group by api_path and file (remove request_num grouping)
+            grouped = df.groupby(['api_path', 'file'])
             
-            for (api_path, request_num, file_name), group in grouped:
-                row_data = {
-                    'api_path': api_path,
-                    'request_num': request_num,
-                    'file': file_name
-                }
+            for (api_path, file_name), group in grouped:
+                # Calculate average response times for each URL
+                url1_data = group[group['url'] == 'URL 1']
+                url2_data = group[group['url'] == 'URL 2']
                 
-                # Add data for each URL
-                for _, row in group.iterrows():
-                    url_key = row['url'].lower().replace(' ', '_')
-                    row_data[f'{url_key}_response_time'] = round(row['response_time'], 2)
-                    row_data[f'{url_key}_status'] = f"✅ {row['status_code']}" if row['success'] else f"❌ {row.get('error', 'Failed')}"
-                    row_data[f'{url_key}_timestamp'] = row['timestamp'].strftime('%H:%M:%S')
-                
-                pivot_data.append(row_data)
+                if not url1_data.empty and not url2_data.empty:
+                    url1_avg_time = url1_data['response_time'].mean()
+                    url2_avg_time = url2_data['response_time'].mean()
+                    time_diff = abs(url2_avg_time - url1_avg_time)
+                    
+                    # Get status (assuming all requests for same file have same status)
+                    url1_status = f"✅ {url1_data.iloc[0]['status_code']}" if url1_data.iloc[0]['success'] else f"❌ {url1_data.iloc[0].get('error', 'Failed')}"
+                    url2_status = f"✅ {url2_data.iloc[0]['status_code']}" if url2_data.iloc[0]['success'] else f"❌ {url2_data.iloc[0].get('error', 'Failed')}"
+                    
+                    row_data = {
+                        'api_path': api_path,
+                        'url_1_response_time': round(url1_avg_time, 2),
+                        'url_1_status': url1_status,
+                        'url_2_response_time': round(url2_avg_time, 2),
+                        'url_2_status': url2_status,
+                        'time_difference': round(time_diff, 2),
+                        'file': file_name
+                    }
+                    
+                    pivot_data.append(row_data)
             
             # Create pivot dataframe
             pivot_df = pd.DataFrame(pivot_data)
             
             # Select and rename columns for display
-            display_columns = ['api_path', 'request_num']
+            display_columns = ['api_path', 'url_1_response_time', 'url_1_status', 'url_2_response_time', 'url_2_status', 'time_difference', 'file']
             column_config = {
                 'api_path': 'API Endpoint',
-                'request_num': 'Request #'
+                'url_1_response_time': st.column_config.NumberColumn(
+                    'URL 1 Response Time (ms)',
+                    format="%.2f ms"
+                ),
+                'url_1_status': 'URL 1 Status',
+                'url_2_response_time': st.column_config.NumberColumn(
+                    'URL 2 Response Time (ms)',
+                    format="%.2f ms"
+                ),
+                'url_2_status': 'URL 2 Status',
+                'time_difference': st.column_config.NumberColumn(
+                    'Time Difference (ms)',
+                    format="%.2f ms",
+                    help="Absolute difference between URL 1 and URL 2 response times."
+                ),
+                'file': 'File'
             }
-            
-            # Add URL1 columns if they exist
-            if 'url_1_response_time' in pivot_df.columns:
-                display_columns.extend(['url_1_response_time', 'url_1_status', 'url_1_timestamp'])
-                column_config.update({
-                    'url_1_response_time': st.column_config.NumberColumn(
-                        'URL 1 Response Time (ms)',
-                        format="%.2f ms"
-                    ),
-                    'url_1_status': 'URL 1 Status',
-                    'url_1_timestamp': 'URL 1 Time'
-                })
-            
-            # Add URL2 columns if they exist
-            if 'url_2_response_time' in pivot_df.columns:
-                display_columns.extend(['url_2_response_time', 'url_2_status', 'url_2_timestamp'])
-                column_config.update({
-                    'url_2_response_time': st.column_config.NumberColumn(
-                        'URL 2 Response Time (ms)',
-                        format="%.2f ms"
-                    ),
-                    'url_2_status': 'URL 2 Status',
-                    'url_2_timestamp': 'URL 2 Time'
-                })
-            
-            # Add file column at the end
-            display_columns.append('file')
-            column_config['file'] = 'File'
             
             st.dataframe(
                 pivot_df[display_columns],
